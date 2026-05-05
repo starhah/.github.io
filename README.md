@@ -1,2 +1,2 @@
 # .github.io
-game of hitting asteroides
+all type of games
