@@ -1,0 +1,1114 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>极简塔防</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #111; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; font-family: 'Segoe UI', sans-serif; color: #fff; }
+        #game-container { position: relative; border: 2px solid #333; }
+        #gameCanvas { display: block; background: #000; }
+        #top-bar { position: absolute; top: 0; left: 0; right: 0; height: 36px; background: rgba(0,0,0,0.9); border-bottom: 1px solid #333; display: flex; align-items: center; justify-content: space-around; font-size: 13px; z-index: 10; }
+        .stat { display: flex; gap: 6px; align-items: center; }
+        .stat-value { font-weight: bold; min-width: 40px; }
+        #panel { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: #1a1a1a; border: 2px solid #444; border-radius: 8px; padding: 16px; display: none; z-index: 20; min-width: 240px; max-height: 80vh; overflow-y: auto; }
+        #panel.visible { display: block; }
+        #panel h3 { margin-bottom: 12px; font-size: 14px; color: #888; text-align: center; }
+        .item-btn { display: flex; align-items: center; gap: 10px; width: 100%; padding: 12px; margin-bottom: 8px; background: #252525; border: 1px solid #444; border-radius: 6px; color: #fff; cursor: pointer; font-size: 12px; transition: all 0.15s; }
+        .item-btn:hover { background: #333; border-color: #666; transform: scale(1.02); }
+        .item-btn.disabled { opacity: 0.4; cursor: not-allowed; }
+        .item-icon { width: 36px; height: 36px; border-radius: 50%; display: flex; align-items: center; justify-content: center; position: relative; }
+        .item-info { flex: 1; }
+        .item-name { font-weight: bold; margin-bottom: 2px; font-size: 13px; }
+        .item-desc { font-size: 11px; color: #aaa; line-height: 1.4; }
+        .item-cost { font-size: 13px; color: #f1c40f; font-weight: bold; }
+        #close-panel { width: 100%; padding: 10px; background: #333; border: none; border-radius: 4px; color: #888; cursor: pointer; font-size: 12px; margin-top: 5px; }
+        #close-panel:hover { background: #444; }
+        #game-over { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.9); display: none; flex-direction: column; align-items: center; justify-content: center; z-index: 100; }
+        #game-over.visible { display: flex; }
+        #game-over h1 { font-size: 28px; margin-bottom: 12px; color: #e74c3c; }
+        #game-over p { font-size: 13px; color: #888; margin-bottom: 16px; }
+        #restart-btn { padding: 10px 24px; background: #27ae60; border: none; border-radius: 4px; color: #fff; font-size: 13px; cursor: pointer; }
+        #restart-btn:hover { background: #2ecc71; }
+        #wave-btn { position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%); padding: 8px 20px; background: #2980b9; border: none; border-radius: 4px; color: #fff; font-size: 12px; cursor: pointer; z-index: 10; }
+        #wave-btn:hover { background: #3498db; }
+        #wave-btn:disabled { background: #555; cursor: not-allowed; }
+    </style>
+</head>
+<body>
+    <div id="game-container">
+        <canvas id="gameCanvas"></canvas>
+        <div id="top-bar">
+            <div class="stat">波次: <span id="wave" class="stat-value">1</span></div>
+            <div class="stat">金币: <span id="gold" class="stat-value">100</span></div>
+            <div class="stat">生命: <span id="lives" class="stat-value">20</span></div>
+            <div class="stat">击杀: <span id="kills" class="stat-value">0</span></div>
+        </div>
+        <div id="panel"><h3 id="panel-title">选择</h3><div id="item-list"></div><button id="close-panel">取消</button></div>
+        <button id="wave-btn">开始波次</button>
+        <div id="game-over"><h1>游戏结束</h1><p>波次: <span id="final-wave">1</span> | 击杀: <span id="final-kills">0</span></p><button id="restart-btn">重新开始</button></div>
+    </div>
+    <script>
+        const GRID = 40, COLS = 20, ROWS = 12, WIDTH = COLS * GRID, HEIGHT = ROWS * GRID + 40, TOP = 40;
+        const canvas = document.getElementById('gameCanvas');
+        canvas.width = WIDTH; canvas.height = HEIGHT;
+        const ctx = canvas.getContext('2d');
+
+        // 炮塔配置 - 三种热塑类型 + 两种特殊类型
+        const TOWERS = [
+            // 标准型：中等射速 + 中等伤害 - 平衡实用
+            { id:'arrow', name:'箭塔', cost:60, damage:25, range:85, rate:700, color:'#e74c3c', darkColor:'#c0392b', type:'standard', desc:'伤害:25 | 射速:中 | DPS:36 | 标准均衡型' },
+            
+            // 速射型：极高射速 + 较低伤害 - 持续输出
+            { id:'laser', name:'激光', cost:90, damage:5, range:70, rate:80, color:'#2ecc71', darkColor:'#27ae60', type:'rapid', desc:'伤害:5 | 射速:极快 | DPS:63 | 速射压制型' },
+            
+            // 狙击型：极低射速 + 极高伤害 - 一击必杀
+            { id:'sniper', name:'狙击', cost:160, damage:120, range:180, rate:2500, color:'#9b59b6', darkColor:'#8e44ad', type:'sniper', desc:'伤害:120 | 射速:极慢 | DPS:48 | 一击必杀型' },
+            
+            // 冰霜型：标准射速 + 低伤害 + 减速控制
+            { id:'ice', name:'冰霜', cost:80, damage:12, range:80, rate:800, color:'#3498db', darkColor:'#2980b9', slow:0.5, type:'control', desc:'伤害:12 | 减速50% | DPS:15 | 控制辅助型' },
+            
+            // 火焰型：较快射速 + 持续灼烧伤害
+            { id:'fire', name:'火焰', cost:100, damage:10, range:75, rate:500, color:'#e67e22', darkColor:'#d35400', burn:4, type:'dot', desc:'伤害:10+DOT | 灼烧3秒 | DPS:26 | 持续伤害型' }
+        ];
+
+        // 陷阱配置
+        const TRAPS = [
+            { id:'spike', name:'尖刺陷阱', cost:30, dps:10, range:38, color:'#7f8c8d', darkColor:'#5d6d7e', desc:'DPS:10 | 持续伤害 | 被动触发' },
+            { id:'lava', name:'熔岩陷阱', cost:60, dps:22, range:40, cooldown:3000, color:'#c0392b', darkColor:'#922b21', desc:'DPS:22 | 高伤害 | 3秒冷却' },
+            { id:'slow', name:'冰霜地带', cost:50, dps:2, range:42, color:'#5dade2', darkColor:'#3498db', slow:0.4, desc:'减速40% | 范围减速 | 辅助' }
+        ];
+
+        // 敌人配置 - 圆形+血条
+        const ENEMIES = [
+            { name:'普通', health:45, armor:0, speed:1.2, gold:5, color:'#27ae60', size:10 },
+            { name:'装甲', health:100, armor:6, speed:0.7, gold:12, color:'#7f8c8d', size:12 },
+            { name:'极速', health:30, armor:0, speed:2.5, gold:8, color:'#f1c40f', size:9 },
+            { name:'精英', health:160, armor:4, speed:1.0, gold:25, color:'#e74c3c', size:11 },
+            { name:'巨型', health:400, armor:12, speed:0.4, gold:45, color:'#8e44ad', size:16 }
+        ];
+
+        // 路径点
+        const PATH = [
+            {x:0,y:5},{x:1,y:5},{x:2,y:5},{x:3,y:5},{x:3,y:4},{x:3,y:3},{x:3,y:2},
+            {x:4,y:2},{x:5,y:2},{x:6,y:2},{x:7,y:2},{x:8,y:2},{x:8,y:3},{x:8,y:4},
+            {x:8,y:5},{x:8,y:6},{x:8,y:7},{x:9,y:7},{x:10,y:7},{x:11,y:7},{x:11,y:6},
+            {x:11,y:5},{x:11,y:4},{x:12,y:4},{x:13,y:4},{x:14,y:4},{x:14,y:5},{x:14,y:6},
+            {x:14,y:7},{x:14,y:8},{x:15,y:8},{x:16,y:8},{x:17,y:8},{x:17,y:7},{x:17,y:6},
+            {x:17,y:5},{x:18,y:5},{x:19,y:5}
+        ];
+
+        let state = { gold:100, lives:20, wave:1, kills:0, waveActive:false, gameOver:false, selectedGrid:null, towers:[], traps:[], enemies:[], projectiles:[], effects:[], grid:[], spawnTimer:0, spawned:0, toSpawn:0, moveTimer:0, hoveredTower:null };
+
+        function initGrid() {
+            state.grid = [];
+            const roadSet = new Set(PATH.map(p => `${p.x},${p.y}`));
+            for (let y = 0; y < ROWS; y++) {
+                state.grid[y] = [];
+                for (let x = 0; x < COLS; x++) {
+                    state.grid[y][x] = { isRoad: roadSet.has(`${x},${y}`), tower:null, trap:null };
+                }
+            }
+        }
+
+        // 绘制带炮管的炮塔（带瞄准角度）
+        function drawTower(tower, cx, cy, size) {
+            const cfg = TOWERS.find(t => t.id === tower.type);
+            const baseSize = size || 14;
+            
+            // 计算瞄准角度
+            let angle = -Math.PI / 2; // 默认向上
+            if (tower.target) {
+                angle = Math.atan2(tower.target.y - (cy - TOP), tower.target.x - cx);
+            }
+            
+            // 底座阴影
+            ctx.fillStyle = 'rgba(0,0,0,0.3)';
+            ctx.beginPath(); ctx.arc(cx + 2, cy + 2, baseSize + 4, 0, Math.PI*2); ctx.fill();
+            
+            // 底座
+            ctx.fillStyle = '#1a1a1a';
+            ctx.beginPath(); ctx.arc(cx, cy, baseSize + 3, 0, Math.PI*2); ctx.fill();
+            
+            // 主体圆形
+            ctx.fillStyle = cfg.color;
+            ctx.beginPath(); ctx.arc(cx, cy, baseSize, 0, Math.PI*2); ctx.fill();
+            
+            // 高光
+            const grad = ctx.createRadialGradient(cx - 4, cy - 4, 0, cx, cy, baseSize);
+            grad.addColorStop(0, 'rgba(255,255,255,0.4)');
+            grad.addColorStop(1, 'transparent');
+            ctx.fillStyle = grad;
+            ctx.beginPath(); ctx.arc(cx, cy, baseSize, 0, Math.PI*2); ctx.fill();
+            
+            // 绘制炮管（根据瞄准角度旋转）
+            ctx.save();
+            ctx.translate(cx, cy);
+            ctx.rotate(angle);
+            
+            ctx.fillStyle = cfg.darkColor;
+            switch(tower.type) {
+                case 'arrow': // 标准型 - 中等矩形炮管
+                    ctx.fillRect(0, -5, baseSize + 6, 10);
+                    ctx.beginPath();
+                    ctx.moveTo(baseSize + 6, 0);
+                    ctx.lineTo(baseSize + 12, -4);
+                    ctx.lineTo(baseSize + 12, 4);
+                    ctx.closePath();
+                    ctx.fill();
+                    // 炮管装饰线
+                    ctx.fillStyle = '#fff';
+                    ctx.globalAlpha = 0.3;
+                    ctx.fillRect(4, -3, baseSize - 4, 2);
+                    ctx.globalAlpha = 1;
+                    break;
+                    
+                case 'laser': // 速射型 - 双管短炮
+                    // 双管设计
+                    ctx.fillRect(0, -9, baseSize + 2, 4);
+                    ctx.fillRect(0, 5, baseSize + 2, 4);
+                    // 炮口闪光
+                    ctx.fillStyle = '#fff';
+                    ctx.beginPath(); ctx.arc(baseSize + 4, -7, 3, 0, Math.PI*2); ctx.fill();
+                    ctx.beginPath(); ctx.arc(baseSize + 4, 7, 3, 0, Math.PI*2); ctx.fill();
+                    // 冷却槽
+                    ctx.fillStyle = '#1a1a1a';
+                    for (let i = 0; i < 3; i++) {
+                        ctx.fillRect(6 + i * 8, -2, 4, 4);
+                    }
+                    break;
+                    
+                case 'sniper': // 狙击型 - 超长精准炮管
+                    // 主炮管（非常长）
+                    ctx.fillRect(0, -4, baseSize + 20, 8);
+                    // 炮口（收窄）
+                    ctx.beginPath();
+                    ctx.moveTo(baseSize + 20, -2);
+                    ctx.lineTo(baseSize + 26, -3);
+                    ctx.lineTo(baseSize + 26, 3);
+                    ctx.lineTo(baseSize + 20, 2);
+                    ctx.closePath();
+                    ctx.fill();
+                    // 瞄准镜
+                    ctx.fillStyle = '#333';
+                    ctx.fillRect(baseSize / 2, -8, 8, 4);
+                    ctx.fillRect(baseSize / 2 + 2, -10, 4, 6);
+                    // 装饰环
+                    ctx.fillStyle = '#fff';
+                    ctx.globalAlpha = 0.5;
+                    ctx.fillRect(8, -4, 2, 8);
+                    ctx.fillRect(baseSize, -4, 2, 8);
+                    ctx.globalAlpha = 1;
+                    break;
+                    
+                case 'ice': // 控制型 - 雪花晶体
+                    ctx.beginPath();
+                    ctx.moveTo(0, -baseSize - 6);
+                    ctx.lineTo(baseSize + 4, 0);
+                    ctx.lineTo(0, baseSize + 6);
+                    ctx.lineTo(-baseSize - 4, 0);
+                    ctx.closePath();
+                    ctx.fill();
+                    // 内部晶体
+                    ctx.fillStyle = '#fff';
+                    ctx.globalAlpha = 0.7;
+                    ctx.beginPath();
+                    ctx.moveTo(0, -8);
+                    ctx.lineTo(6, 0);
+                    ctx.lineTo(0, 8);
+                    ctx.lineTo(-6, 0);
+                    ctx.closePath();
+                    ctx.fill();
+                    ctx.globalAlpha = 1;
+                    break;
+                    
+                case 'fire': // 持续伤害型 - 喷火器
+                    // 宽口炮管
+                    ctx.beginPath();
+                    ctx.moveTo(-8, -8);
+                    ctx.lineTo(baseSize + 8, -5);
+                    ctx.lineTo(baseSize + 8, 5);
+                    ctx.lineTo(-8, 8);
+                    ctx.closePath();
+                    ctx.fill();
+                    // 火焰核心
+                    ctx.fillStyle = '#f1c40f';
+                    ctx.beginPath();
+                    ctx.arc(baseSize / 2, 0, 6, 0, Math.PI*2); ctx.fill();
+                    ctx.fillStyle = '#fff';
+                    ctx.beginPath();
+                    ctx.arc(baseSize / 2, 0, 3, 0, Math.PI*2); ctx.fill();
+                    break;
+            }
+            
+            ctx.restore();
+            
+            // 类型标签（根据类型显示不同颜色的小点）
+            const typeColors = { standard: '#fff', rapid: '#2ecc71', sniper: '#9b59b6', control: '#3498db', dot: '#e67e22' };
+            ctx.fillStyle = typeColors[cfg.type] || '#fff';
+            ctx.beginPath(); ctx.arc(cx + baseSize - 2, cy - baseSize + 2, 4, 0, Math.PI*2); ctx.fill();
+            
+            // 等级显示
+            if (tower.level > 1) {
+                ctx.fillStyle = '#fff';
+                ctx.font = 'bold 10px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillStyle = '#000';
+                ctx.fillText(tower.level, cx, cy + baseSize + 10);
+                ctx.fillStyle = '#fff';
+                ctx.fillText(tower.level, cx - 1, cy + baseSize + 9);
+            }
+        }
+        
+        // 绘制炮塔攻击范围（虚线圆）
+        function drawTowerRange(tower) {
+            const cfg = TOWERS.find(t => t.id === tower.type);
+            const range = cfg.range * (1 + tower.level * 0.15);
+            const cx = tower.x + GRID/2;
+            const cy = tower.y + GRID/2 + TOP;
+            
+            // 虚线圆
+            ctx.strokeStyle = cfg.color;
+            ctx.lineWidth = 2;
+            ctx.setLineDash([8, 6]);
+            ctx.globalAlpha = 0.4;
+            ctx.beginPath();
+            ctx.arc(cx, cy, range, 0, Math.PI*2);
+            ctx.stroke();
+            
+            // 内圈（更淡）
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([4, 8]);
+            ctx.globalAlpha = 0.2;
+            ctx.beginPath();
+            ctx.arc(cx, cy, range - 5, 0, Math.PI*2);
+            ctx.stroke();
+            
+            ctx.setLineDash([]);
+            ctx.globalAlpha = 1;
+        }
+
+        // 绘制陷阱
+        function drawTrap(trap, cx, cy) {
+            const cfg = TRAPS.find(t => t.id === trap.type);
+            
+            switch(trap.type) {
+                case 'spike': // 三角形尖刺
+                    ctx.fillStyle = cfg.color;
+                    for (let i = 0; i < 3; i++) {
+                        const angle = (i * 120 - 90) * Math.PI / 180;
+                        const ox = Math.cos(angle) * 6, oy = Math.sin(angle) * 6;
+                        ctx.beginPath();
+                        ctx.moveTo(cx + ox, cy + oy - 8);
+                        ctx.lineTo(cx + ox + 6, cy + oy + 6);
+                        ctx.lineTo(cx + ox - 6, cy + oy + 6);
+                        ctx.closePath();
+                        ctx.fill();
+                    }
+                    ctx.fillStyle = cfg.darkColor;
+                    ctx.beginPath();
+                    ctx.moveTo(cx, cy - 10);
+                    ctx.lineTo(cx + 8, cy + 8);
+                    ctx.lineTo(cx - 8, cy + 8);
+                    ctx.closePath();
+                    ctx.fill();
+                    break;
+                    
+                case 'lava': // 岩浆池
+                    const time = Date.now() / 200;
+                    const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, 18);
+                    grad.addColorStop(0, '#f39c12');
+                    grad.addColorStop(0.5, cfg.color);
+                    grad.addColorStop(1, 'rgba(192,57,43,0.3)');
+                    ctx.fillStyle = grad;
+                    ctx.beginPath(); ctx.arc(cx, cy, 16 + Math.sin(time) * 2, 0, Math.PI*2); ctx.fill();
+                    
+                    // 气泡效果
+                    ctx.fillStyle = '#f1c40f';
+                    for (let i = 0; i < 3; i++) {
+                        const bx = cx + Math.cos(time + i * 2) * 6;
+                        const by = cy + Math.sin(time + i * 2.5) * 4 - 4;
+                        ctx.beginPath(); ctx.arc(bx, by, 2, 0, Math.PI*2); ctx.fill();
+                    }
+                    break;
+                    
+                case 'slow': // 冰霜地带
+                    ctx.globalAlpha = 0.5;
+                    const slowGrad = ctx.createRadialGradient(cx, cy, 0, cx, cy, 20);
+                    slowGrad.addColorStop(0, cfg.color);
+                    slowGrad.addColorStop(1, 'rgba(93,173,226,0.1)');
+                    ctx.fillStyle = slowGrad;
+                    ctx.beginPath(); ctx.arc(cx, cy, 18, 0, Math.PI*2); ctx.fill();
+                    
+                    // 雪花装饰
+                    ctx.fillStyle = '#fff';
+                    ctx.globalAlpha = 0.7;
+                    for (let i = 0; i < 6; i++) {
+                        const angle = (i * 60) * Math.PI / 180;
+                        const sx = cx + Math.cos(angle) * 8, sy = cy + Math.sin(angle) * 8;
+                        ctx.beginPath(); ctx.arc(sx, sy, 2, 0, Math.PI*2); ctx.fill();
+                    }
+                    ctx.globalAlpha = 1;
+                    break;
+            }
+        }
+
+        function render() {
+            ctx.fillStyle = '#000';
+            ctx.fillRect(0, 0, WIDTH, HEIGHT);
+            
+            // 绘制网格
+            for (let y = 0; y < ROWS; y++) {
+                for (let x = 0; x < COLS; x++) {
+                    const gx = x * GRID, gy = y * GRID + TOP;
+                    if (state.grid[y][x].isRoad) {
+                        ctx.fillStyle = '#fff';
+                        ctx.fillRect(gx + 1, gy + 1, GRID - 2, GRID - 2);
+                    } else {
+                        ctx.strokeStyle = '#333';
+                        ctx.lineWidth = 1;
+                        ctx.strokeRect(gx, gy, GRID, GRID);
+                    }
+                }
+            }
+            
+            // 选中高亮
+            if (state.selectedGrid) {
+                const { x, y } = state.selectedGrid;
+                ctx.strokeStyle = '#f39c12';
+                ctx.lineWidth = 3;
+                ctx.strokeRect(x * GRID + 2, y * GRID + TOP + 2, GRID - 4, GRID - 4);
+            }
+            
+            // 陷阱
+            state.traps.forEach(trap => {
+                drawTrap(trap, trap.x + GRID/2, trap.y + GRID/2 + TOP);
+            });
+            
+            // 炮塔攻击范围
+            state.towers.forEach(tower => {
+                drawTowerRange(tower);
+            });
+            
+            // 悬停炮塔范围高亮
+            if (state.hoveredTower) {
+                const cfg = TOWERS.find(t => t.id === state.hoveredTower.type);
+                const range = cfg.range * (1 + state.hoveredTower.level * 0.15);
+                const cx = state.hoveredTower.x + GRID/2;
+                const cy = state.hoveredTower.y + GRID/2 + TOP;
+                
+                // 高亮范围
+                ctx.fillStyle = cfg.color;
+                ctx.globalAlpha = 0.1;
+                ctx.beginPath();
+                ctx.arc(cx, cy, range, 0, Math.PI*2);
+                ctx.fill();
+                ctx.globalAlpha = 1;
+                
+                // 实线边框
+                ctx.strokeStyle = cfg.color;
+                ctx.lineWidth = 3;
+                ctx.setLineDash([]);
+                ctx.globalAlpha = 0.8;
+                ctx.beginPath();
+                ctx.arc(cx, cy, range, 0, Math.PI*2);
+                ctx.stroke();
+                ctx.globalAlpha = 1;
+                
+                // 中心点
+                ctx.fillStyle = cfg.color;
+                ctx.beginPath(); ctx.arc(cx, cy, 4, 0, Math.PI*2); ctx.fill();
+            }
+            
+            // 炮塔
+            state.towers.forEach(tower => {
+                drawTower(tower, tower.x + GRID/2, tower.y + GRID/2 + TOP);
+            });
+            
+            // 敌人
+            state.enemies.forEach(enemy => {
+                // 身体
+                ctx.fillStyle = enemy.color;
+                ctx.beginPath(); ctx.arc(enemy.x, enemy.y + TOP, enemy.size, 0, Math.PI*2); ctx.fill();
+                
+                // 高光
+                const grad = ctx.createRadialGradient(
+                    enemy.x - enemy.size/3, enemy.y + TOP - enemy.size/3, 0,
+                    enemy.x, enemy.y + TOP, enemy.size
+                );
+                grad.addColorStop(0, 'rgba(255,255,255,0.3)');
+                grad.addColorStop(1, 'transparent');
+                ctx.fillStyle = grad;
+                ctx.beginPath(); ctx.arc(enemy.x, enemy.y + TOP, enemy.size, 0, Math.PI*2); ctx.fill();
+                
+                // 减速光环
+                if (enemy.slowTime > 0) {
+                    ctx.strokeStyle = '#3498db';
+                    ctx.lineWidth = 2;
+                    ctx.globalAlpha = 0.5;
+                    ctx.beginPath(); ctx.arc(enemy.x, enemy.y + TOP, enemy.size + 3, 0, Math.PI*2); ctx.stroke();
+                    ctx.globalAlpha = 1;
+                }
+                
+                // 血条
+                const barW = enemy.size * 2.5, barH = 4, barX = enemy.x - barW/2, barY = enemy.y + TOP - enemy.size - 9;
+                ctx.fillStyle = '#333';
+                ctx.fillRect(barX, barY, barW, barH);
+                const hp = Math.max(0, enemy.health / enemy.maxHealth);
+                ctx.fillStyle = hp > 0.5 ? '#2ecc71' : hp > 0.25 ? '#f39c12' : '#e74c3c';
+                ctx.fillRect(barX, barY, barW * hp, barH);
+                ctx.strokeStyle = '#222';
+                ctx.lineWidth = 1;
+                ctx.strokeRect(barX, barY, barW, barH);
+            });
+            
+            // 弹射物
+            state.projectiles.forEach(proj => {
+                ctx.fillStyle = proj.color;
+                ctx.beginPath(); ctx.arc(proj.x, proj.y + TOP, 4, 0, Math.PI*2); ctx.fill();
+                ctx.fillStyle = '#fff';
+                ctx.beginPath(); ctx.arc(proj.x, proj.y + TOP, 2, 0, Math.PI*2); ctx.fill();
+            });
+            
+            // 特效
+            state.effects.forEach(eff => {
+                ctx.globalAlpha = eff.alpha;
+                
+                if (eff.type === 'gold') {
+                    // 金币粒子
+                    ctx.fillStyle = eff.color;
+                    ctx.beginPath(); ctx.arc(eff.x, eff.y, eff.r, 0, Math.PI*2); ctx.fill();
+                    ctx.fillStyle = '#fff';
+                    ctx.beginPath(); ctx.arc(eff.x - 1, eff.y - 1, eff.r * 0.4, 0, Math.PI*2); ctx.fill();
+                    if (eff.text) {
+                        ctx.fillStyle = '#fff';
+                        ctx.font = 'bold 12px sans-serif';
+                        ctx.textAlign = 'center';
+                        ctx.fillText(eff.text, eff.x, eff.y + eff.r + 10);
+                    }
+                } else if (eff.type === 'goldText') {
+                    // 金币数字
+                    ctx.fillStyle = '#f1c40f';
+                    ctx.font = 'bold 16px sans-serif';
+                    ctx.textAlign = 'center';
+                    ctx.strokeStyle = '#000';
+                    ctx.lineWidth = 3;
+                    ctx.strokeText(eff.text, eff.x, eff.y);
+                    ctx.fillText(eff.text, eff.x, eff.y);
+                } else if (eff.type === 'flash') {
+                    // 白色闪光
+                    const grad = ctx.createRadialGradient(eff.x, eff.y, 0, eff.x, eff.y, eff.r);
+                    grad.addColorStop(0, 'rgba(255,255,255,0.8)');
+                    grad.addColorStop(0.5, 'rgba(255,255,255,0.3)');
+                    grad.addColorStop(1, 'transparent');
+                    ctx.fillStyle = grad;
+                    ctx.beginPath(); ctx.arc(eff.x, eff.y, eff.r, 0, Math.PI*2); ctx.fill();
+                } else if (eff.text) {
+                    // 伤害数字
+                    ctx.fillStyle = eff.color;
+                    ctx.font = 'bold 14px sans-serif';
+                    ctx.textAlign = 'center';
+                    ctx.fillText(eff.text, eff.x, eff.y);
+                } else {
+                    // 普通粒子
+                    ctx.fillStyle = eff.color;
+                    ctx.beginPath(); ctx.arc(eff.x, eff.y, eff.r, 0, Math.PI*2); ctx.fill();
+                }
+            });
+            ctx.globalAlpha = 1;
+        }
+
+        function update(dt) {
+            if (state.gameOver) return;
+            
+            // 生成敌人
+            if (state.waveActive && state.spawned < state.toSpawn) {
+                state.spawnTimer += dt;
+                if (state.spawnTimer >= 800) {
+                    spawnEnemy();
+                    state.spawnTimer = 0;
+                }
+            }
+            
+            // 更新敌人 - 离散式移动
+            for (let i = state.enemies.length - 1; i >= 0; i--) {
+                const enemy = state.enemies[i];
+                
+                // 减速效果计时
+                if (enemy.slowTime > 0) enemy.slowTime -= dt;
+                
+                // 灼烧效果
+                if (enemy.burnTime > 0) {
+                    enemy.burnTime -= dt;
+                    enemy.health -= enemy.burnDps * dt / 1000;
+                    // 灼烧特效
+                    if (Math.random() < 0.1) {
+                        addEffect(enemy.x, enemy.y + TOP, '#f39c12', 4);
+                    }
+                }
+                
+                // 离散式移动 - 根据速度决定移动间隔
+                const moveInterval = enemy.slowTime > 0 ? 1000 : 600; // 减速时更慢
+                enemy.moveTimer = (enemy.moveTimer || 0) + dt;
+                
+                if (enemy.moveTimer >= moveInterval) {
+                    enemy.moveTimer = 0;
+                    
+                    // 移动一格
+                    enemy.pathPos += 1;
+                    
+                    // 检查陷阱
+                    checkTrapDamage(enemy);
+                    
+                    // 到达终点
+                    if (enemy.pathPos >= PATH.length - 1) {
+                        state.enemies.splice(i, 1);
+                        state.lives--;
+                        updateUI();
+                        if (state.lives <= 0) endGame();
+                        continue;
+                    }
+                }
+                
+                // 位置 - 离散到当前格子中心
+                const idx = Math.floor(Math.min(enemy.pathPos, PATH.length - 1));
+                enemy.x = PATH[idx].x * GRID + GRID / 2;
+                enemy.y = PATH[idx].y * GRID + GRID / 2;
+                
+                // 死亡
+                if (enemy.health <= 0) {
+                    // 金币掉落动画
+                    spawnGoldDrop(enemy.x, enemy.y + TOP, enemy.gold);
+                    state.gold += enemy.gold;
+                    state.kills++;
+                    // 粒子爆炸效果
+                    spawnDeathParticles(enemy.x, enemy.y + TOP, enemy.color, enemy.size);
+                    state.enemies.splice(i, 1);
+                    updateUI();
+                }
+            }
+            
+            // 陷阱持续伤害效果
+            const trapNow = Date.now();
+            state.traps.forEach(trap => {
+                const cfg = TRAPS.find(t => t.id === trap.type);
+                state.enemies.forEach(enemy => {
+                    const dx = enemy.x - trap.x - GRID/2;
+                    const dy = enemy.y - trap.y - GRID/2;
+                    if (Math.sqrt(dx*dx + dy*dy) <= cfg.range) {
+                        if (!enemy.lastTrapDmg || trapNow - enemy.lastTrapDmg >= 500) {
+                            enemy.health -= cfg.dps * 0.5;
+                            enemy.lastTrapDmg = trapNow;
+                            // 明显的攻击反馈
+                            addTrapHitEffect(enemy, trap, cfg);
+                        }
+                    }
+                });
+            });
+            
+            // 炮塔攻击
+            const now = Date.now();
+            state.towers.forEach(tower => {
+                const cfg = TOWERS.find(t => t.id === tower.type);
+                const range = cfg.range * (1 + tower.level * 0.15);
+                const damage = cfg.damage * (1 + tower.level * 0.25);
+                
+                // 找最远的敌人（在范围内）
+                let target = null, maxProgress = -1;
+                state.enemies.forEach(enemy => {
+                    const dx = enemy.x - tower.x - GRID/2;
+                    const dy = enemy.y - tower.y - GRID/2;
+                    const dist = Math.sqrt(dx*dx + dy*dy);
+                    if (dist <= range && enemy.pathPos > maxProgress) {
+                        maxProgress = enemy.pathPos;
+                        target = enemy;
+                    }
+                });
+                
+                tower.target = target;
+                if (target && now - tower.lastFire >= cfg.rate) {
+                    tower.lastFire = now;
+                    fireProjectile(tower, target, damage, cfg);
+                }
+            });
+            
+            // 弹射物
+            for (let i = state.projectiles.length - 1; i >= 0; i--) {
+                const proj = state.projectiles[i];
+                proj.x += proj.vx * dt / 16;
+                proj.y += proj.vy * dt / 16;
+                
+                let hit = false;
+                state.enemies.forEach(enemy => {
+                    const dx = enemy.x - proj.x;
+                    const dy = enemy.y - proj.y;
+                    if (Math.sqrt(dx*dx + dy*dy) < enemy.size + 5) {
+                        const dmg = Math.max(1, proj.damage - enemy.armor * 0.3);
+                        enemy.health -= dmg;
+                        if (proj.slow) {
+                            enemy.slowTime = 1500;
+                            enemy.slowFactor = proj.slow;
+                        }
+                        if (proj.burn) {
+                            enemy.burnTime = 2000;
+                            enemy.burnDps = proj.burn;
+                        }
+                        addEffect(proj.x, proj.y, proj.color, 6);
+                        hit = true;
+                    }
+                });
+                
+                if (hit || proj.x < 0 || proj.x > WIDTH || proj.y < 0 || proj.y > ROWS * GRID) {
+                    state.projectiles.splice(i, 1);
+                }
+            }
+            
+            // 陷阱触发检查 - 敌人经过时调用
+            function checkTrapDamage(enemy) {
+                state.traps.forEach(trap => {
+                    const cfg = TRAPS.find(t => t.id === trap.type);
+                    const dx = enemy.x - trap.x - GRID/2;
+                    const dy = enemy.y - trap.y - GRID/2;
+                    if (Math.sqrt(dx*dx + dy*dy) <= cfg.range) {
+                        enemy.health -= cfg.dps * 1.5; // 经过时额外伤害
+                        if (cfg.slow) {
+                            enemy.slowTime = 1500;
+                            enemy.slowFactor = cfg.slow;
+                        }
+                        // 明显的触发反馈
+                        addTrapTriggerEffect(trap, cfg);
+                    }
+                });
+            }
+            
+            // 陷阱触发特效
+            function addTrapTriggerEffect(trap, cfg) {
+                const cx = trap.x + GRID/2;
+                const cy = trap.y + GRID/2 + TOP;
+                
+                switch(trap.type) {
+                    case 'spike':
+                        // 尖刺上升效果
+                        for (let i = 0; i < 4; i++) {
+                            const angle = Math.random() * Math.PI * 2;
+                            state.effects.push({
+                                x: cx + Math.cos(angle) * 10,
+                                y: cy + Math.sin(angle) * 10,
+                                color: cfg.color,
+                                r: 4,
+                                alpha: 1
+                            });
+                        }
+                        break;
+                    case 'lava':
+                        // 岩浆爆发
+                        for (let i = 0; i < 6; i++) {
+                            const angle = Math.random() * Math.PI * 2;
+                            state.effects.push({
+                                x: cx + Math.cos(angle) * 15,
+                                y: cy + Math.sin(angle) * 15,
+                                color: '#f1c40f',
+                                r: 6,
+                                alpha: 1
+                            });
+                        }
+                        break;
+                    case 'slow':
+                        // 冰晶散射
+                        for (let i = 0; i < 5; i++) {
+                            const angle = Math.random() * Math.PI * 2;
+                            state.effects.push({
+                                x: cx + Math.cos(angle) * 12,
+                                y: cy + Math.sin(angle) * 12,
+                                color: '#fff',
+                                r: 3,
+                                alpha: 1
+                            });
+                        }
+                        break;
+                }
+            }
+            
+            // 陷阱持续伤害效果
+            function addTrapHitEffect(enemy, trap, cfg) {
+                // 在敌人位置显示伤害数字
+                state.effects.push({
+                    x: enemy.x,
+                    y: enemy.y + TOP - 15,
+                    color: '#e74c3c',
+                    r: 0,
+                    alpha: 1,
+                    text: Math.floor(cfg.dps) + ''
+                });
+            }
+            
+            // 特效淡出
+            for (let i = state.effects.length - 1; i >= 0; i--) {
+                const e = state.effects[i];
+                
+                // 应用速度
+                if (e.vx !== undefined) {
+                    e.x += e.vx;
+                    e.y += e.vy;
+                    if (e.gravity) e.vy += e.gravity;
+                }
+                
+                // 文字特效
+                if (e.type === 'goldText') {
+                    e.y -= 1;
+                    e.alpha -= 0.02;
+                }
+                // 金币粒子
+                else if (e.type === 'gold') {
+                    e.alpha -= 0.03;
+                }
+                // 闪光效果
+                else if (e.type === 'flash') {
+                    e.alpha -= 0.1;
+                    e.r += 2;
+                }
+                // 普通粒子
+                else {
+                    if (e.text) {
+                        e.alpha -= 0.03;
+                        e.y -= 0.5;
+                    } else {
+                        e.alpha -= 0.06;
+                        e.r += 0.5;
+                    }
+                }
+                
+                if (e.alpha <= 0) state.effects.splice(i, 1);
+            }
+            
+            // 波次结束
+            if (state.waveActive && state.spawned >= state.toSpawn && state.enemies.length === 0) {
+                state.waveActive = false;
+                state.wave++;
+                document.getElementById('wave-btn').disabled = false;
+                updateUI();
+            }
+        }
+
+        function spawnEnemy() {
+            const waveLevel = Math.floor(state.wave / 3) + 1;
+            
+            // 根据波次选择敌人类型
+            let availableTypes = [];
+            availableTypes.push(ENEMIES[0]); // 普通
+            if (state.wave >= 2) availableTypes.push(ENEMIES[2]); // 极速
+            if (state.wave >= 4) availableTypes.push(ENEMIES[1]); // 装甲
+            if (state.wave >= 6) availableTypes.push(ENEMIES[3]); // 精英
+            if (state.wave >= 8) availableTypes.push(ENEMIES[4]); // 巨型
+            
+            const cfg = availableTypes[Math.floor(Math.random() * availableTypes.length)];
+            
+            const enemy = {
+                x: PATH[0].x * GRID + GRID/2,
+                y: PATH[0].y * GRID + GRID/2,
+                health: cfg.health * waveLevel,
+                maxHealth: cfg.health * waveLevel,
+                armor: cfg.armor + Math.floor(waveLevel * 0.5),
+                speed: cfg.speed * (1 + waveLevel * 0.03),
+                gold: Math.floor(cfg.gold * waveLevel * 0.8),
+                color: cfg.color,
+                size: cfg.size,
+                pathPos: 0,
+                moveTimer: 0,
+                slowTime: 0,
+                slowFactor: 1,
+                burnTime: 0,
+                burnDps: 0,
+                lastTrapDmg: 0
+            };
+            
+            state.enemies.push(enemy);
+            state.spawned++;
+        }
+
+        function fireProjectile(tower, target, damage, cfg) {
+            const sx = tower.x + GRID/2;
+            const sy = tower.y + GRID/2;
+            const dx = target.x - sx;
+            const dy = target.y - sy;
+            const dist = Math.sqrt(dx*dx + dy*dy);
+            
+            state.projectiles.push({
+                x: sx, y: sy,
+                vx: dx/dist * 8,
+                vy: dy/dist * 8,
+                damage,
+                color: cfg.color,
+                slow: cfg.slow || 0,
+                burn: cfg.burn || 0
+            });
+        }
+
+        function addEffect(x, y, color, size) {
+            state.effects.push({ x, y, color, r: size, alpha: 0.8 });
+        }
+        
+        // 金币掉落效果
+        function spawnGoldDrop(x, y, amount) {
+            // 创建金币图标粒子
+            for (let i = 0; i < 3; i++) {
+                const angle = (Math.random() - 0.5) * Math.PI;
+                const speed = 1 + Math.random() * 2;
+                state.effects.push({
+                    x: x,
+                    y: y,
+                    vx: Math.cos(angle) * speed,
+                    vy: -2 - Math.random() * 2,
+                    color: '#f1c40f',
+                    r: 6,
+                    alpha: 1,
+                    type: 'gold',
+                    text: i === 0 ? '+' + amount : '',
+                    gravity: 0.1
+                });
+            }
+            // 金币数字飘字
+            state.effects.push({
+                x: x,
+                y: y - 20,
+                vx: 0,
+                vy: -1,
+                color: '#f1c40f',
+                r: 0,
+                alpha: 1,
+                type: 'goldText',
+                text: '+' + amount,
+                gravity: 0
+            });
+        }
+        
+        // 死亡粒子爆炸
+        function spawnDeathParticles(x, y, color, size) {
+            const particleCount = 12 + Math.floor(size / 2);
+            for (let i = 0; i < particleCount; i++) {
+                const angle = (i / particleCount) * Math.PI * 2 + Math.random() * 0.3;
+                const speed = 2 + Math.random() * 4;
+                const particleSize = 3 + Math.random() * 4;
+                state.effects.push({
+                    x: x,
+                    y: y,
+                    vx: Math.cos(angle) * speed,
+                    vy: Math.sin(angle) * speed,
+                    color: color,
+                    r: particleSize,
+                    alpha: 1,
+                    type: 'particle',
+                    gravity: 0.05
+                });
+            }
+            // 白色闪光
+            state.effects.push({
+                x: x,
+                y: y,
+                vx: 0,
+                vy: 0,
+                color: '#fff',
+                r: size * 2,
+                alpha: 0.8,
+                type: 'flash'
+            });
+        }
+
+        function updateUI() {
+            document.getElementById('wave').textContent = state.wave;
+            document.getElementById('gold').textContent = state.gold;
+            document.getElementById('lives').textContent = state.lives;
+            document.getElementById('kills').textContent = state.kills;
+        }
+
+        function endGame() {
+            state.gameOver = true;
+            document.getElementById('final-wave').textContent = state.wave;
+            document.getElementById('final-kills').textContent = state.kills;
+            document.getElementById('game-over').classList.add('visible');
+        }
+
+        function restart() {
+            state = {
+                gold: 100,
+                lives: 20,
+                wave: 1,
+                kills: 0,
+                waveActive: false,
+                gameOver: false,
+                selectedGrid: null,
+                towers: [],
+                traps: [],
+                enemies: [],
+                projectiles: [],
+                effects: [],
+                grid: [],
+                spawnTimer: 0,
+                spawned: 0,
+                toSpawn: 0,
+                moveTimer: 0,
+                hoveredTower: null
+            };
+            initGrid();
+            document.getElementById('game-over').classList.remove('visible');
+            document.getElementById('wave-btn').disabled = false;
+            document.getElementById('panel').classList.remove('visible');
+            updateUI();
+        }
+
+        // 鼠标移动 - 检测悬停炮塔
+        canvas.addEventListener('mousemove', e => {
+            const rect = canvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top - TOP;
+            
+            state.hoveredTower = null;
+            
+            for (let i = 0; i < state.towers.length; i++) {
+                const tower = state.towers[i];
+                const cx = tower.x + GRID/2;
+                const cy = tower.y + GRID/2;
+                const dx = x - cx;
+                const dy = y - cy;
+                if (Math.sqrt(dx*dx + dy*dy) <= GRID/2) {
+                    state.hoveredTower = tower;
+                    break;
+                }
+            }
+        });
+        
+        canvas.addEventListener('mouseleave', () => {
+            state.hoveredTower = null;
+        });
+        
+        // 点击事件
+        canvas.addEventListener('click', e => {
+            const rect = canvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top - TOP;
+            
+            if (y < 0 || y >= ROWS * GRID) return;
+            
+            const gx = Math.floor(x / GRID);
+            const gy = Math.floor(y / GRID);
+            
+            if (gx < 0 || gx >= COLS || gy < 0 || gy >= ROWS) return;
+            
+            const cell = state.grid[gy][gx];
+            
+            if (cell.isRoad) {
+                if (!cell.trap) {
+                    state.selectedGrid = { x: gx, y: gy };
+                    showPanel('trap', gx, gy);
+                }
+            } else {
+                if (!cell.tower) {
+                    state.selectedGrid = { x: gx, y: gy };
+                    showPanel('tower', gx, gy);
+                }
+            }
+        });
+
+        function showPanel(type, gx, gy) {
+            const list = document.getElementById('item-list');
+            const title = document.getElementById('panel-title');
+            list.innerHTML = '';
+            
+            title.textContent = type === 'tower' ? '选择炮塔' : '选择陷阱';
+            
+            const items = type === 'tower' ? TOWERS : TRAPS;
+            
+            items.forEach(item => {
+                const btn = document.createElement('button');
+                btn.className = 'item-btn' + (state.gold < item.cost ? ' disabled' : '');
+                
+                // 创建图标
+                const iconDiv = document.createElement('div');
+                iconDiv.className = 'item-icon';
+                iconDiv.style.background = item.color;
+                
+                btn.innerHTML = `
+                    <div class="item-info">
+                        <div class="item-name">${item.name}</div>
+                        <div class="item-desc">${item.desc}</div>
+                    </div>
+                    <div class="item-cost">$${item.cost}</div>
+                `;
+                
+                btn.insertBefore(iconDiv, btn.firstChild);
+                
+                if (state.gold >= item.cost) {
+                    btn.onclick = () => build(type, item, gx, gy);
+                }
+                
+                list.appendChild(btn);
+            });
+            
+            document.getElementById('panel').classList.add('visible');
+        }
+
+        function build(type, cfg, gx, gy) {
+            if (state.gold < cfg.cost) return;
+            
+            state.gold -= cfg.cost;
+            
+            if (type === 'tower') {
+                state.grid[gy][gx].tower = cfg.id;
+                state.towers.push({
+                    type: cfg.id,
+                    x: gx * GRID,
+                    y: gy * GRID,
+                    level: 1,
+                    lastFire: 0,
+                    target: null
+                });
+            } else {
+                state.grid[gy][gx].trap = cfg.id;
+                state.traps.push({
+                    type: cfg.id,
+                    x: gx * GRID,
+                    y: gy * GRID,
+                    lastTrigger: 0
+                });
+            }
+            
+            document.getElementById('panel').classList.remove('visible');
+            state.selectedGrid = null;
+            updateUI();
+        }
+
+        document.getElementById('close-panel').onclick = () => {
+            document.getElementById('panel').classList.remove('visible');
+            state.selectedGrid = null;
+        };
+
+        document.getElementById('wave-btn').onclick = () => {
+            if (state.waveActive || state.gameOver) return;
+            state.waveActive = true;
+            state.toSpawn = 5 + state.wave * 2;
+            state.spawned = 0;
+            state.spawnTimer = 0;
+            document.getElementById('wave-btn').disabled = true;
+        };
+
+        document.getElementById('restart-btn').onclick = restart;
+
+        // 游戏循环
+        let lastTime = 0;
+        function gameLoop(time) {
+            const dt = Math.min(time - lastTime, 50);
+            lastTime = time;
+            update(dt);
+            render();
+            requestAnimationFrame(gameLoop);
+        }
+
+        // 初始化
+        initGrid();
+        updateUI();
+        requestAnimationFrame(gameLoop);
+    </script>
+</body>
+</html>
